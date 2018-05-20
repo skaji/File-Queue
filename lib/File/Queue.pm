@@ -19,7 +19,7 @@ our $VERSION = '0.001';
 }
 
 use Fcntl qw(:flock SEEK_CUR);
-use POSIX qw(O_RDWR O_CREAT);
+use POSIX qw(O_RDWR O_CREAT O_RDONLY);
 
 my $FORMAT_VERSION = '1';
 my $META_SIZE = 64;
@@ -27,13 +27,15 @@ my $META_SIZE = 64;
 sub new {
     my ($class, %args) = @_;
 
-    sysopen my $fh, $args{file}, O_RDWR | O_CREAT or die "$!: $args{file}";
+    my $open_flag = $args{readonly} ? O_RDONLY : O_RDWR | O_CREAT;
+    sysopen my $fh, $args{file}, $open_flag or die "$!: $args{file}";
     my $self = bless {
         size => 1024**2,
         %args,
         owner => $$,
         meta_size => 64,
         fh => $fh,
+        open_flag => $open_flag,
     }, $class;
 
     my $guard = File::Queue::Lock->new($fh, LOCK_EX);
@@ -53,6 +55,27 @@ sub new {
     $self;
 }
 
+sub stat {
+    my $self = shift;
+    my $meta = $self->_meta_read;
+    my $mtime = (stat $self->{fh})[9];
+
+    my $free;
+    if ($meta->{count} == 0) {
+        $free = $meta->{size} - $META_SIZE;
+    } elsif ($meta->{last} < $meta->{first}) {
+        $free = $meta->{first} - $meta->{last};
+    } else {
+        $free = $meta->{first} - $META_SIZE + $meta->{size} - $meta->{last};
+    }
+    +{
+        size => $meta->{size} - $META_SIZE,
+        free => $free,
+        count => $meta->{count},
+        mtime => $mtime,
+    };
+}
+
 sub enqueue {
     my ($self, $data) = @_;
     $self->_reopen_if_any;
@@ -63,7 +86,7 @@ sub enqueue {
     $ok;
 }
 
-sub denqueue {
+sub dequeue {
     my $self = shift;
     $self->_reopen_if_any;
     my $guard = File::Queue::Lock->new($self->{fh}, LOCK_EX);
@@ -77,7 +100,7 @@ sub _reopen_if_any {
     my $self = shift;
     return if $self->{owner} == $$;
     close $self->{fh};
-    sysopen my $fh, $self->{file}, O_RDWR | O_CREAT or die "$!: $self->{file}";
+    sysopen my $fh, $self->{file}, $self->{open_flag} or die "$!: $self->{file}";
     $self->{owner} = $$;
     $self->{fh} = $fh;
 }
